@@ -8,7 +8,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
-import redis.clients.jedis.JedisPool
 import redis.clients.jedis.JedisPooled
 import redis.clients.jedis.StreamEntryID
 import redis.clients.jedis.bloom.BFReserveParams
@@ -19,7 +18,6 @@ import java.nio.file.Paths
 
 fun main() {
     val jedis = JedisPooled()
-    val jedisPool = JedisPool()
 
     val tokenizer = HuggingFaceTokenizer.newInstance(Paths.get("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bluesky-bot/model/DeBERTa-v3-large-mnli-fever-anli-ling-wanli/tokenizer.json"))
 
@@ -47,57 +45,59 @@ fun main() {
         listOf(
             async(Dispatchers.IO) {
                 consumeStream(
-                    jedisPool,
-                    jedis,
-                    streamName = "jetstream",
-                    consumerGroup = "store-example",
+                    jedis = jedis,
                     consumer = "store-1",
-                    handlers = listOf(
-                        deduplicate(jedis, bloomFilterName),
-                        filter(predictor),
-                        storeEvent(jedis),
-                        printUri,
-                        addFilteredEventToStream(jedis)
-                    ),
-                    count = 1
+                    predictor = predictor,
+                    bloomFilterName = bloomFilterName
                 )
             },
             async(Dispatchers.IO) {
                 consumeStream(
-                    jedisPool,
-                    jedis,
-                    streamName = "jetstream",
-                    consumerGroup = "store-example",
+                    jedis = jedis,
                     consumer = "store-2",
-                    handlers = listOf(
-                        deduplicate(jedis, bloomFilterName),
-                        filter(predictor),
-                        storeEvent(jedis),
-                        printUri,
-                        addFilteredEventToStream(jedis)
-                    ),
-                    count = 1
+                    predictor = predictor,
+                    bloomFilterName = bloomFilterName
                 )
             },
             async(Dispatchers.IO) {
                 consumeStream(
-                    jedisPool,
-                    jedis,
-                    streamName = "jetstream",
-                    consumerGroup = "store-example",
+                    jedis = jedis,
                     consumer = "store-3",
-                    handlers = listOf(
-                        deduplicate(jedis, bloomFilterName),
-                        filter(predictor),
-                        storeEvent(jedis),
-                        printUri,
-                        addFilteredEventToStream(jedis)
-                    ),
-                    count = 1
+                    predictor = predictor,
+                    bloomFilterName = bloomFilterName
+                )
+            },
+            async(Dispatchers.IO) {
+                consumeStream(
+                    jedis = jedis,
+                    consumer = "store-4",
+                    predictor = predictor,
+                    bloomFilterName = bloomFilterName
                 )
             }
         ).awaitAll()
     }
+}
+
+fun consumeStream(
+    jedis: JedisPooled,
+    consumer: String,
+    predictor: Predictor<ZeroShotClassificationInput, ZeroShotClassificationOutput>,
+    bloomFilterName: String) {
+    consumeStream(
+        jedis,
+        streamName = "jetstream",
+        consumerGroup = "store-example",
+        consumer = consumer,
+        handlers = listOf(
+            deduplicate(jedis, bloomFilterName),
+            filter(predictor),
+            storeEvent(jedis),
+            printUri,
+            addFilteredEventToStream(jedis)
+        ),
+        count = 1
+    )
 }
 
 fun createConsumerGroup(jedis: JedisPooled, streamName: String, consumerGroupName: String) {
@@ -119,30 +119,19 @@ fun readFromStream(jedis: JedisPooled, streamName: String, consumerGroup: String
     ) ?: emptyList()
 }
 
-fun ackAndBfFn(jedisPool: JedisPool, bloomFilter: String, streamName: String, consumerGroup: String, entry: StreamEntry) =
-    {
-        jedisPool.resource.use { jedis ->
-            // Create a transaction
-            val multi = jedis.multi()
+fun ackAndBfFn(jedisPooled: JedisPooled, bloomFilter: String, streamName: String, consumerGroup: String, entry: StreamEntry) {
+    // Acknowledge the message
+    jedisPooled.xack(
+        streamName,
+        consumerGroup,
+        entry.id
+    )
 
-            // Acknowledge the message
-            multi.xack(
-                streamName,
-                consumerGroup,
-                entry.id
-            )
-
-            // Add the URI to the bloom filter
-            multi.bfAdd(bloomFilter, Event.fromMap(entry).uri)
-
-            // Execute the transaction
-            multi.exec()
-            println("acked")
-        }
-    }
+    // Add the URI to the bloom filter
+    jedisPooled.bfAdd(bloomFilter, Event.fromMap(entry).uri)
+}
 
 fun consumeStream(
-    jedisPool: JedisPool,
     jedis: JedisPooled,
     streamName: String,
     consumerGroup: String,
@@ -158,7 +147,7 @@ fun consumeStream(
 
             for (handler in handlers) {
                 val (shouldContinue, message) = handler(event)
-                ackAndBfFn(jedisPool, "store-bf", streamName, consumerGroup, entry)
+                ackAndBfFn(jedis, "store-bf", streamName, consumerGroup, entry)
 
                 if (!shouldContinue) {
                     println("$consumer: Handler stopped processing: $message")
@@ -178,7 +167,7 @@ fun createBloomFilter(jedis: JedisPooled, name: String) {
 }
 
 fun classify(predictor: Predictor<ZeroShotClassificationInput, ZeroShotClassificationOutput>, premise: String): ZeroShotClassificationOutput {
-    val candidateLabels = listOf("Software Engineering", "Software Programming")
+    val candidateLabels = listOf("Politics")
     val input = ZeroShotClassificationInput(premise, candidateLabels.toTypedArray(), true, "{}")
     return predictor.predict(input)
 }

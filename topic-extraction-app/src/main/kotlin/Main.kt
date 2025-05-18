@@ -29,8 +29,8 @@ fun main() {
     val jedisPool = JedisPool()
 
     // Ollama doesn't run concurrently :( - OpenAI could do it
-    getOllamaChatModel()
-    val openAiChatModel = getOpenAiChatModel()
+    val chatModel = getOllamaChatModel()
+    getOpenAiChatModel()
 
     val bloomFilterName = "topic-extractor-bf"
     createBloomFilter(jedis, bloomFilterName)
@@ -47,7 +47,7 @@ fun main() {
                     consumer = "topic-extractor-1",
                     handlers = listOf(
                         deduplicate(jedis, bloomFilterName),
-                        extractTopics(openAiChatModel, jedisPool),
+                        extractTopics(chatModel, jedisPool),
                         printUri,
                     ),
                     count = 1
@@ -62,7 +62,7 @@ fun main() {
                     consumer = "topic-extractor-2",
                     handlers = listOf(
                         deduplicate(jedis, bloomFilterName),
-                        extractTopics(openAiChatModel, jedisPool),
+                        extractTopics(chatModel, jedisPool),
                         printUri,
                     ),
                     count = 1
@@ -93,24 +93,30 @@ private fun getOpenAiChatModel(): OpenAiChatModel {
     return openAiChatModel
 }
 
-private fun getOllamaChatModel() {
+private fun getOllamaChatModel(): OllamaChatModel {
     val ollamaApi = OllamaApi.builder()
         .baseUrl("http://localhost:11434")
         .build()
 
-    val ollamaOptions = OllamaOptions.builder().model("mistral").build()
+    val ollamaOptions = OllamaOptions.builder().model("deepseek-coder-v2").build()
 
-    val ollamaChatModel = OllamaChatModel.builder()
+    return OllamaChatModel.builder()
         .ollamaApi(ollamaApi)
         .defaultOptions(ollamaOptions)
         .build()
 }
 
 val systemPrompt = """
-You are a topic classifier specialized in software engineering. Given a post, extract only software-related topics—both explicitly mentioned and reasonably implied.
+You are a topic classifier specialized in politics. Given a post, extract only politics-related topics—both explicitly mentioned and reasonably implied.
 
-If a post mentions a tool, language, or library, infer related technologies or domains. For example, if the post mentions LangChain, you may infer topics like “Python”, “AI
-”, and “Machine Learning”. Avoid generic terms like “announcement”, “event”, or “release”. Only return the technical topics. Also avoid too narrow topics such as a specific method or command.
+If a post mentions a political figure, event, party, law, or movement, infer related political topics or domains.
+
+For example, if the post mentions “Green New Deal”, you may infer topics like “climate policy”, “progressive politics”, and “US Congress”.
+
+Avoid generic terms like “news”, “statement”, or “speech”.
+Only return relevant political topics.
+
+Also avoid overly narrow items such as specific bill numbers or individual quotes.
 
 If the topic or a very similar is already in the provided list of existing topics, use the one from the list, otherwise, feel free to create a new one.
 
@@ -120,29 +126,29 @@ Format your response as comma separated values (ALWAYS, I MEAN IT):
 Examples:
 
 Post:
-Kotlin is the best programming language for beginners
+Climate change policy needs serious bipartisan commitment.
 Output:
-"Kotlin, Programming Languages"
-
+“Climate Policy, Bipartisanship, Environmental Politics”
+⸻
 Post:
-Excited to try some Hugging Face Models with DJL!
+Macron’s recent comments on NATO expansion are causing waves.
 Output:
-"Hugging Face, Deep Java Library (DJL), Machine Learning, AI, Python, Java"
-
+“Emmanuel Macron, NATO, Foreign Policy, European Politics”
+⸻
 Post:
-Just deployed a FastAPI app using Redis as a cache layer
+Just watched a debate on universal basic income — fascinating stuff!
 Output:
-"FastAPI, Redis, Python, Web Development, Caching"
-
+“Universal Basic Income, Economic Policy, Social Welfare”
+⸻
 Post:
-The new version of LangChain is now available!! It’s finally GA!
+The Supreme Court decision today is a major turning point.
 Output:
-"LangChain, Python, AI, Machine Learning"
-
+“Supreme Court, Judicial System, Constitutional Law”
+⸻
 Post:
-Redis is so cool! I love the LOLWUT command.
+Alexandria Ocasio-Cortez is pushing for stronger climate legislation.
 Output:
-"Redis, Database"
+“Alexandria Ocasio-Cortez, Climate Policy, Progressive Politics, US Congress”
 """
 
 fun createConsumerGroup(jedis: JedisPooled, streamName: String, consumerGroupName: String) {
@@ -164,27 +170,25 @@ fun readFromStream(jedis: JedisPooled, streamName: String, consumerGroup: String
     ) ?: emptyList()
 }
 
-fun ackAndBfFn(jedisPool: JedisPool, bloomFilter: String, streamName: String, consumerGroup: String, entry: StreamEntry) =
-    {
-        jedisPool.resource.use { jedis ->
-            // Create a transaction
-            val multi = jedis.multi()
+fun ackAndBfFn(jedisPool: JedisPool, bloomFilter: String, streamName: String, consumerGroup: String, entry: StreamEntry) {
+    jedisPool.resource.use { jedis ->
+        // Create a transaction
+        val multi = jedis.multi()
 
-            // Acknowledge the message
-            multi.xack(
-                streamName,
-                consumerGroup,
-                entry.id
-            )
+        // Acknowledge the message
+        multi.xack(
+            streamName,
+            consumerGroup,
+            entry.id
+        )
 
-            // Add the URI to the bloom filter
-            multi.bfAdd(bloomFilter, Event.fromMap(entry).uri)
+        // Add the URI to the bloom filter
+        multi.bfAdd(bloomFilter, Event.fromMap(entry).uri)
 
-            // Execute the transaction
-            multi.exec()
-            println("acked")
-        }
+        // Execute the transaction
+        multi.exec()
     }
+}
 
 fun consumeStream(
     jedisPool: JedisPool,
@@ -223,7 +227,7 @@ fun topicModeling(chatModel: ChatModel, post: String, existingTopics: String): S
 
     val response = chatModel.call(Prompt(messages))
 
-    return response.result.output.text
+    return response.result.output.text ?: ""
 }
 
 fun createBloomFilter(jedis: JedisPooled, name: String) {
@@ -269,6 +273,8 @@ fun extractTopics(chatModel: ChatModel, jedisPool: JedisPool): (Event) -> Pair<B
         val existingTopics = jedis.smembers("topics")
         val topics = topicModeling(chatModel, event.text, existingTopics.joinToString(", "))
             .replace("\"", "")
+            .replace("“", "")
+            .replace("”", "")
             .split(",")
             .map { it.trim() }
 

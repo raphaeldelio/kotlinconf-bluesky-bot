@@ -47,11 +47,13 @@ suspend fun consumeJetstream(client: HttpClient, limit: Int = -1, onEvent: (Even
     }
 }
 
-fun addToStream(jedis: JedisPooled, streamName: String, hash: Map<String, String>) = jedis.xadd(
-    streamName,
-    XAddParams.xAddParams()
-        .id(StreamEntryID.NEW_ENTRY)
-        .maxLen(1_000_000)
-        .exactTrimming(),
-    hash
-)
+fun addToStream(jedis: JedisPooled, streamName: String, hash: Map<String, String>) {
+    jedis.xadd(
+        streamName,
+        XAddParams.xAddParams()
+            .id(StreamEntryID.NEW_ENTRY)
+            .maxLen(1_000_000)
+            .exactTrimming(),
+        hash
+    )
+}

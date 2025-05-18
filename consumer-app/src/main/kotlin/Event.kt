@@ -98,6 +98,7 @@ data class Event(
 fun Event.toMap() = mapOf(
     "did" to this.did,
     "createdAt" to this.commit?.record?.createdAt.toString(),
+    "timeUs" to this.timeUs.toString(),
     "text" to this.commit?.record?.text.toString(),
     "langs" to this.commit?.record?.langs.toString(),
     "operation" to this.commit?.operation.toString(),
