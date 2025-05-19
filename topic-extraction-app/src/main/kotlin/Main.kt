@@ -21,6 +21,7 @@ import redis.clients.jedis.bloom.BFReserveParams
 import redis.clients.jedis.exceptions.JedisDataException
 import redis.clients.jedis.params.XReadGroupParams
 import redis.clients.jedis.resps.StreamEntry
+import java.io.File
 import java.time.Duration
 import java.time.LocalDateTime
 
@@ -106,50 +107,7 @@ private fun getOllamaChatModel(): OllamaChatModel {
         .build()
 }
 
-val systemPrompt = """
-You are a topic classifier specialized in politics. Given a post, extract only politics-related topics—both explicitly mentioned and reasonably implied.
-
-If a post mentions a political figure, event, party, law, or movement, infer related political topics or domains.
-
-For example, if the post mentions “Green New Deal”, you may infer topics like “climate policy”, “progressive politics”, and “US Congress”.
-
-Avoid generic terms like “news”, “statement”, or “speech”.
-Only return relevant political topics.
-
-Also avoid overly narrow items such as specific bill numbers or individual quotes.
-
-If the topic or a very similar is already in the provided list of existing topics, use the one from the list, otherwise, feel free to create a new one.
-
-Format your response as comma separated values (ALWAYS, I MEAN IT):
-"topic1, topic2, topic3"
-
-Examples:
-
-Post:
-Climate change policy needs serious bipartisan commitment.
-Output:
-“Climate Policy, Bipartisanship, Environmental Politics”
-⸻
-Post:
-Macron’s recent comments on NATO expansion are causing waves.
-Output:
-“Emmanuel Macron, NATO, Foreign Policy, European Politics”
-⸻
-Post:
-Just watched a debate on universal basic income — fascinating stuff!
-Output:
-“Universal Basic Income, Economic Policy, Social Welfare”
-⸻
-Post:
-The Supreme Court decision today is a major turning point.
-Output:
-“Supreme Court, Judicial System, Constitutional Law”
-⸻
-Post:
-Alexandria Ocasio-Cortez is pushing for stronger climate legislation.
-Output:
-“Alexandria Ocasio-Cortez, Climate Policy, Progressive Politics, US Congress”
-"""
+val topicModelingSystemPrompt = File("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bsky-bot/kotlin-notebooks/notebooks/resources/topic-modeling-prompt.txt").readText()
 
 fun createConsumerGroup(jedis: JedisPooled, streamName: String, consumerGroupName: String) {
     try {
@@ -220,7 +178,7 @@ fun consumeStream(
 
 fun topicModeling(chatModel: ChatModel, post: String, existingTopics: String): String {
     val messages = listOf(
-        SystemMessage(systemPrompt),
+        SystemMessage(topicModelingSystemPrompt),
         UserMessage("Existing topics: $existingTopics"),
         UserMessage("Post: $post")
     )
@@ -282,7 +240,7 @@ fun extractTopics(chatModel: ChatModel, jedisPool: JedisPool): (Event) -> Pair<B
         val multi = jedis.multi()
         multi.hset("post:" + event.uri, mapOf("topics" to topics.joinToString("|")))
         multi.sadd("topics", *topics.toTypedArray())
-        multi.cmsIncrBy(cmsKey, topics.associate { it to 1 })
+        multi.cmsIncrBy(cmsKey, topics.filter { it.isNotBlank() }.associateWith { 1 })
         multi.exec()
         Pair(true, "OK")
     }

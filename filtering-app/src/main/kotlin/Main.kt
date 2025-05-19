@@ -19,7 +19,7 @@ import java.nio.file.Paths
 fun main() {
     val jedis = JedisPooled()
 
-    val tokenizer = HuggingFaceTokenizer.newInstance(Paths.get("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bluesky-bot/model/DeBERTa-v3-large-mnli-fever-anli-ling-wanli/tokenizer.json"))
+    val tokenizer = HuggingFaceTokenizer.newInstance(Paths.get("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bsky-bot/kotlin-notebooks/notebooks/resources/model/DeBERTa-v3-large-mnli-fever-anli-ling-wanli/tokenizer.json"))
 
     val translator = CustomZeroShotClassificationTranslator.builder(tokenizer).build()
 
@@ -28,7 +28,7 @@ fun main() {
             ZeroShotClassificationInput::class.java,
             ZeroShotClassificationOutput::class.java
         )
-        .optModelPath(Paths.get("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bluesky-bot/model/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"))
+        .optModelPath(Paths.get("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bsky-bot/kotlin-notebooks/notebooks/resources/model/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"))
         .optEngine("PyTorch")
         .optTranslator(translator)
         .build()
