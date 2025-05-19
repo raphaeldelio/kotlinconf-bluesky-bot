@@ -13,6 +13,12 @@ import org.springframework.ai.chat.messages.SystemMessage
 import org.springframework.ai.chat.messages.UserMessage
 import org.springframework.ai.chat.prompt.Prompt
 import java.io.File
+import redis.clients.jedis.search.Query
+import java.time.LocalDateTime
+import org.springframework.ai.vectorstore.redis.RedisVectorStore
+import org.springframework.ai.vectorstore.redis.RedisVectorStore.MetadataField
+import redis.clients.jedis.search.Schema.FieldType
+import org.springframework.ai.vectorstore.SearchRequest
 
 val jedisPooled = JedisPooled()
 
@@ -114,6 +120,14 @@ fun getEmbeddingModel(): TransformersEmbeddingModel {
     return embeddingModel
 }
 
+fun getEmbeddingModelForRouting(): TransformersEmbeddingModel {
+    val embeddingModel = TransformersEmbeddingModel()
+    embeddingModel.setModelResource("file:resources/model/bge-large-en-v1.5/model.onnx")
+    embeddingModel.setTokenizerResource("file:resources/model/bge-large-en-v1.5/tokenizer.json")
+    embeddingModel.afterPropertiesSet()
+    return embeddingModel
+}
+
 val ollamaApi = OllamaApi.builder()
     .baseUrl("http://localhost:11434")
     .build()
@@ -136,4 +150,166 @@ fun topicModeling(post: String, existingTopics: String): String {
 
     val response = ollamaChatModel.call(Prompt(messages))
     return response.result.output.text ?: ""
+}
+
+fun breakSentenceIntoClauses(sentence: String): List<String> {
+    return sentence.split(Regex("""[!?,.:;()"\[\]{}]+"""))
+        .filter { it.isNotBlank() }.map { it.trim() }
+}
+
+fun matchRoute(query: String): Set<String> {
+    return breakSentenceIntoClauses(query).flatMap { clause ->
+        val result = getRedisVectorStore().similaritySearch(
+            SearchRequest.builder()
+                .topK(1)
+                .query(clause)
+                .build()
+        )
+
+        val route = result?.firstOrNull()?.metadata?.get("route") as String
+        val minThreshold = result.firstOrNull()?.metadata?.get("minThreshold") as String
+
+        result.forEach {
+            println(clause)
+            println(route)
+            println(it.score ?: 0.0)
+            println(minThreshold)
+            println()
+        }
+
+        result.filter { (it?.score ?: 0.0) > minThreshold.toDouble() }.map {
+            it?.metadata?.get("route") as String
+        }
+    }.toSet()
+}
+
+fun trendingTopics(): Set<String> {
+    val currentMinute = LocalDateTime.now().withSecond(0).withNano(0).toString()
+    return try {
+        jedisPooled.smembers("topics")
+            .map { it to jedisPooled.cmsQuery("topics-cms:$currentMinute", it).first() }
+            .sortedByDescending { it.second }
+            .take(10)
+            .map { it.first }
+            .toSet()
+    } catch (_: Exception) {
+        emptySet()
+    }
+}
+
+fun processUserRequest(
+    query: String,
+    handler: (String, String) -> Iterable<String>
+): String {
+    val routes = matchRoute(query)
+    println(routes)
+
+    val enrichedData = routes.map { route -> handler(route, query) }
+
+    val systemPrompt = """
+    You write tweet-sized posts to help users analyze political topics happening in Bluesky. 
+    Use the provided data (from posts), but remember: the user doesn’t see it. 
+    Be extremely concise — max 300 characters. One paragraph. Every word counts.
+    You're replying directly to the end user (the one who asked the question)
+    
+    Examples:
+    Summarization intent:
+    	1.	
+
+Debate around the new tax policy is intense. Supporters say it’s key for funding public services, while critics argue it puts too much pressure on the middle class and ignores corporate loopholes.
+
+	2.	
+
+Angela Merkel is being praised in hindsight, with users pointing to her calm leadership and long-term vision — especially when comparing her era to recent political instability in Europe.
+
+	3.	
+
+Housing is a top concern. Many posts blame unaffordable prices on weak rent control, foreign investors, and lack of government action. Frustration is growing, especially among young renters.
+
+	4.	
+
+The new climate bill is getting mixed reactions. Some see it as a step forward, but many question if it goes far enough or if it’s just corporate-friendly greenwashing without real accountability.
+
+	5.	
+
+Student loan forgiveness is trending. Supporters say it brings relief to millions, but others push back, arguing it’s unfair to those who already paid or never went to college.
+
+    Trending topics intent:
+    		1.	
+
+Trending: climate protests, Merkel’s legacy, AI regulation, housing crisis, student debt relief.
+
+	2.	
+
+This week’s hot topics: Gaza ceasefire talks, EU elections, inflation fears, TikTok ban debate, green energy subsidies.
+
+	3.	
+
+People are posting about: Trump trial, Gen Z voting power, Supreme Court decisions, tech layoffs, universal basic income.
+
+	4.	
+
+Buzzing now: Ukraine aid package, healthcare reform, crypto regulation, labor strikes, rising food prices.
+
+	5.	
+
+Most talked-about: political polarization, tax reform, immigration policy, public education funding, climate anxiety.
+    """.trimIndent()
+
+    return ollamaChatModel.call(
+        Prompt(
+            SystemMessage(systemPrompt),
+            SystemMessage("Intents detected: $routes"),
+            SystemMessage("Enriching data: $enrichedData"),
+            UserMessage("User query: $query")
+        )
+    ).result.output.text ?: ""
+}
+
+fun summarization(userQuery: String): List<String> {
+    val existingTopics = jedisPooled.smembers("topics").joinToString { ", " }
+    val queryTopics = topicModeling(userQuery, existingTopics).replace("\"", "").split(", ")
+    println(queryTopics)
+
+    return queryTopics.map { topic ->
+        val query = Query("@topics:{'$topic'}")
+            .returnFields("text")
+            .setSortBy("time_us", false)
+            .dialect(2)
+            .limit(0, 10)
+
+        val result = jedisPooled.ftSearch(
+            "postIdx",
+            query
+        )
+
+        result.documents.map {
+                document -> document.get("text").toString()
+        }
+    }.flatten()
+}
+
+val multiHandler: (String, String) -> Iterable<String> = { route, query ->
+    when (route) {
+        "trending_topics" -> trendingTopics()
+        "summarization" -> summarization(query)
+        else -> emptyList()
+    }
+}
+
+fun getRedisVectorStore(): RedisVectorStore {
+    val redisVectorStore = RedisVectorStore.builder(jedisPooled, getEmbeddingModelForRouting())
+        .indexName("routeIdx")
+        .contentFieldName("text")
+        .embeddingFieldName("textEmbedding")
+        .metadataFields(
+            MetadataField("route", FieldType.TEXT),
+            MetadataField("minThreshold", FieldType.NUMERIC),
+        )
+        .prefix("route:")
+        .initializeSchema(true)
+        .vectorAlgorithm(RedisVectorStore.Algorithm.FLAT)
+        .build()
+    redisVectorStore.afterPropertiesSet()
+    return redisVectorStore
 }
