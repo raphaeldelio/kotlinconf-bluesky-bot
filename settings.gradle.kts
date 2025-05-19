@@ -5,3 +5,4 @@ rootProject.name = "kotlinconf-bsky-bot"
 include("consumer-app")
 include("filtering-app")
 include("topic-extraction-app")
+include("kotlin-notebooks")
