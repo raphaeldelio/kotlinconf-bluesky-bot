@@ -1,40 +1,33 @@
-import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer
-import ai.djl.inference.Predictor
-import ai.djl.modality.nlp.translator.ZeroShotClassificationInput
-import ai.djl.modality.nlp.translator.ZeroShotClassificationOutput
-import ai.djl.repository.zoo.Criteria
-import ai.djl.repository.zoo.ModelZoo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import org.springframework.ai.document.Document
+import org.springframework.ai.transformers.TransformersEmbeddingModel
+import org.springframework.ai.vectorstore.SearchRequest
+import org.springframework.ai.vectorstore.redis.RedisVectorStore
 import redis.clients.jedis.JedisPooled
 import redis.clients.jedis.StreamEntryID
 import redis.clients.jedis.bloom.BFReserveParams
 import redis.clients.jedis.params.XAddParams
 import redis.clients.jedis.params.XReadGroupParams
 import redis.clients.jedis.resps.StreamEntry
-import java.nio.file.Paths
+import java.io.File
+import java.util.UUID
 
 fun main() {
     val jedis = JedisPooled()
 
-    val tokenizer = HuggingFaceTokenizer.newInstance(Paths.get("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bsky-bot/kotlin-notebooks/notebooks/resources/model/DeBERTa-v3-large-mnli-fever-anli-ling-wanli/tokenizer.json"))
+    val embeddingModel = TransformersEmbeddingModel()
+    embeddingModel.afterPropertiesSet()
 
-    val translator = CustomZeroShotClassificationTranslator.builder(tokenizer).build()
+    val wasIndexAlreadyCreated = jedis.ftList().contains("classifierIdx")
+    val redisVectorStore = getRedisVectorStore(jedis, embeddingModel)
 
-    val criteria: Criteria<ZeroShotClassificationInput, ZeroShotClassificationOutput> = Criteria.builder()
-        .setTypes(
-            ZeroShotClassificationInput::class.java,
-            ZeroShotClassificationOutput::class.java
-        )
-        .optModelPath(Paths.get("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bsky-bot/kotlin-notebooks/notebooks/resources/model/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"))
-        .optEngine("PyTorch")
-        .optTranslator(translator)
-        .build()
-
-    val model = ModelZoo.loadModel(criteria)
-    val predictor = model.newPredictor()
+    if (!wasIndexAlreadyCreated) {
+        loadReferencesIntoRedis(redisVectorStore)
+    }
 
     val bloomFilterName = "store-bf"
     createBloomFilter(jedis, bloomFilterName)
@@ -47,7 +40,7 @@ fun main() {
                 consumeStream(
                     jedis = jedis,
                     consumer = "store-1",
-                    predictor = predictor,
+                    redisVectorStore = redisVectorStore,
                     bloomFilterName = bloomFilterName
                 )
             },
@@ -55,7 +48,7 @@ fun main() {
                 consumeStream(
                     jedis = jedis,
                     consumer = "store-2",
-                    predictor = predictor,
+                    redisVectorStore = redisVectorStore,
                     bloomFilterName = bloomFilterName
                 )
             },
@@ -63,7 +56,7 @@ fun main() {
                 consumeStream(
                     jedis = jedis,
                     consumer = "store-3",
-                    predictor = predictor,
+                    redisVectorStore = redisVectorStore,
                     bloomFilterName = bloomFilterName
                 )
             },
@@ -71,7 +64,7 @@ fun main() {
                 consumeStream(
                     jedis = jedis,
                     consumer = "store-4",
-                    predictor = predictor,
+                    redisVectorStore = redisVectorStore,
                     bloomFilterName = bloomFilterName
                 )
             }
@@ -82,7 +75,7 @@ fun main() {
 fun consumeStream(
     jedis: JedisPooled,
     consumer: String,
-    predictor: Predictor<ZeroShotClassificationInput, ZeroShotClassificationOutput>,
+    redisVectorStore: RedisVectorStore,
     bloomFilterName: String) {
     consumeStream(
         jedis,
@@ -91,7 +84,7 @@ fun consumeStream(
         consumer = consumer,
         handlers = listOf(
             deduplicate(jedis, bloomFilterName),
-            filter(predictor),
+            filter(redisVectorStore),
             storeEvent(jedis),
             printUri,
             addFilteredEventToStream(jedis)
@@ -166,10 +159,20 @@ fun createBloomFilter(jedis: JedisPooled, name: String) {
     }
 }
 
-fun classify(predictor: Predictor<ZeroShotClassificationInput, ZeroShotClassificationOutput>, premise: String): ZeroShotClassificationOutput {
-    val candidateLabels = listOf("Politics")
-    val input = ZeroShotClassificationInput(premise, candidateLabels.toTypedArray(), true, "{}")
-    return predictor.predict(input)
+fun breakSentenceIntoClauses(sentence: String): List<String> {
+    return sentence.split(Regex("""[!?,.:;()"\[\]{}]+"""))
+        .filter { it.isNotBlank() }.map { it.trim() }
+}
+
+fun classify(redisVectorStore: RedisVectorStore, post: String): List<Double> {
+    return breakSentenceIntoClauses(post).map { clause ->
+        (redisVectorStore.similaritySearch(
+            SearchRequest.builder()
+                .topK(1)
+                .query(clause)
+                .build()
+        )?.map { it.score ?: 0.0 } ?: emptyList())
+    }.flatten()
 }
 
 val printUri: (Event) -> Pair<Boolean, String> = {
@@ -187,11 +190,11 @@ fun deduplicate(jedis: JedisPooled, bloomFilter: String): (Event) -> Pair<Boolea
     }
 }
 
-fun filter(predictor: Predictor<ZeroShotClassificationInput, ZeroShotClassificationOutput>): (Event) -> Pair<Boolean, String> =
+fun filter(redisVectorStore: RedisVectorStore): (Event) -> Pair<Boolean, String> =
     { event ->
         if (event.text.isNotBlank() && event.operation != "delete") {
-            val classification = classify(predictor, event.text)
-            if (classification.scores.any { it > 0.90 }) {
+            val scores = classify(redisVectorStore, event.text)
+            if (scores.any { it > 0.75 }) {
                 Pair(true, "OK")
             } else {
                 Pair(false, "Not a post related to software")
@@ -202,7 +205,7 @@ fun filter(predictor: Predictor<ZeroShotClassificationInput, ZeroShotClassificat
     }
 
 fun storeEvent(jedis: JedisPooled): (Event) -> Pair<Boolean, String> = { event ->
-    jedis.hset("post:" + event.uri, event.toMap())
+    jedis.hset("post:" + event.uri.replace("at://did:plc:", ""), event.toMap())
     Pair(true, "OK")
 }
 
@@ -218,4 +221,35 @@ fun addFilteredEventToStream(jedis: JedisPooled): (Event) -> Pair<Boolean, Strin
     Pair(true, "OK")
 }
 
+fun getRedisVectorStore(jedisPooled: JedisPooled, embeddingModel: TransformersEmbeddingModel): RedisVectorStore {
+    val redisVectorStore = RedisVectorStore.builder(jedisPooled, embeddingModel)
+        .indexName("classifierIdx")
+        .contentFieldName("text")
+        .embeddingFieldName("textEmbedding")
+        .prefix("classifier:")
+        .initializeSchema(true)
+        .vectorAlgorithm(RedisVectorStore.Algorithm.FLAT)
+        .build()
+    redisVectorStore.afterPropertiesSet()
+    return redisVectorStore
+}
 
+fun loadReferencesIntoRedis(redisVectorStore: RedisVectorStore) {
+    val references = Json.decodeFromString<List<String>>(File("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bsky-bot/filtering-app/src/main/resources/filtering_examples.json").readText())
+
+    val documents = references.map { text ->
+        createFilterDocument(text)
+    }
+
+    redisVectorStore.add(documents)
+}
+
+fun createFilterDocument(text: String): Document {
+    return Document(
+        UUID.randomUUID().toString(),
+        text,
+        mapOf(
+            "text" to text,
+        )
+    )
+}

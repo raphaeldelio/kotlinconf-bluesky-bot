@@ -18,17 +18,11 @@ dependencies {
 
     implementation("redis.clients:jedis:6.0.0")
 
-    implementation("org.springframework.ai:spring-ai-transformers:1.0.0-RC1")
-    implementation("org.springframework.ai:spring-ai-ollama:1.0.0-RC1")
-    implementation("org.springframework.ai:spring-ai-redis-store:1.0.0-RC1")
-
+    implementation("org.springframework.ai:spring-ai-transformers:1.0.0")
+    implementation("org.springframework.ai:spring-ai-ollama:1.0.0")
+    implementation("org.springframework.ai:spring-ai-redis-store:1.0.0")
 
     implementation("ai.djl.huggingface:tokenizers:0.33.0")
-    implementation("ai.djl.pytorch:pytorch-engine:0.33.0")
-    implementation("ai.djl:api:0.33.0")
-    implementation("ai.djl:model-zoo:0.33.0")
-
-
 
     testImplementation(kotlin("test"))
 }

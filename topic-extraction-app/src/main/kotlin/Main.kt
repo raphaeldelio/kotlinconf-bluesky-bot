@@ -107,7 +107,7 @@ private fun getOllamaChatModel(): OllamaChatModel {
         .build()
 }
 
-val topicModelingSystemPrompt = File("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bsky-bot/kotlin-notebooks/notebooks/resources/topic-modeling-prompt.txt").readText()
+val topicModelingSystemPrompt = File("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bsky-bot/topic-extraction-app/src/main/resources/topic-extractor-prompt.txt").readText()
 
 fun createConsumerGroup(jedis: JedisPooled, streamName: String, consumerGroupName: String) {
     try {
@@ -197,7 +197,7 @@ fun createBloomFilter(jedis: JedisPooled, name: String) {
 }
 
 fun createCountMinSketch(jedisPool: JedisPool): String {
-    val windowBucket = LocalDateTime.now().withSecond(0).withNano(0)
+    val windowBucket = LocalDateTime.now().withMinute(0).withSecond(0).withNano(0)
     try {
         jedisPool.resource.use {
             val multi = it.multi()
@@ -238,7 +238,7 @@ fun extractTopics(chatModel: ChatModel, jedisPool: JedisPool): (Event) -> Pair<B
 
         val cmsKey = createCountMinSketch(jedisPool)
         val multi = jedis.multi()
-        multi.hset("post:" + event.uri, mapOf("topics" to topics.joinToString("|")))
+        multi.hset("post:" + event.uri.replace("at://did:plc:", ""), mapOf("topics" to topics.joinToString("|")))
         multi.sadd("topics", *topics.toTypedArray())
         multi.cmsIncrBy(cmsKey, topics.filter { it.isNotBlank() }.associateWith { 1 })
         multi.exec()

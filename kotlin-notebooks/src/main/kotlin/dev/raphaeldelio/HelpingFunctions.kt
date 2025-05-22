@@ -139,9 +139,9 @@ val ollamaChatModel = OllamaChatModel.builder()
     .defaultOptions(ollamaOptions)
     .build()
 
-val topicModelingSystemPrompt = File("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bsky-bot/kotlin-notebooks/notebooks/resources/topic-modeling-prompt.txt").readText()
+val topicModelingSystemPrompt = File("/Users/raphaeldelio/Documents/GitHub/redis/kotlinconf-bsky-bot/kotlin-notebooks/notebooks/resources/topic-extractor-prompt.txt").readText()
 
-fun topicModeling(post: String, existingTopics: String): String {
+fun topicExtraction(post: String, existingTopics: String): String {
     val messages = listOf(
         SystemMessage(topicModelingSystemPrompt),
         UserMessage("Existing topics: $existingTopics"),
@@ -184,7 +184,7 @@ fun matchRoute(query: String): Set<String> {
 }
 
 fun trendingTopics(): Set<String> {
-    val currentMinute = LocalDateTime.now().withSecond(0).withNano(0).toString()
+    val currentMinute = LocalDateTime.now().withMinute(0).withSecond(0).withNano(0).toString()
     return try {
         jedisPooled.smembers("topics")
             .map { it to jedisPooled.cmsQuery("topics-cms:$currentMinute", it).first() }
@@ -268,7 +268,7 @@ Most talked-about: political polarization, tax reform, immigration policy, publi
 
 fun summarization(userQuery: String): List<String> {
     val existingTopics = jedisPooled.smembers("topics").joinToString { ", " }
-    val queryTopics = topicModeling(userQuery, existingTopics).replace("\"", "").split(", ")
+    val queryTopics = topicExtraction(userQuery, existingTopics).replace("\"", "").split(", ")
     println(queryTopics)
 
     return queryTopics.map { topic ->
