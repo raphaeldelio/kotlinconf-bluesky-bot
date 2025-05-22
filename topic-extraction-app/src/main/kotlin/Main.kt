@@ -176,7 +176,7 @@ fun consumeStream(
     }
 }
 
-fun topicModeling(chatModel: ChatModel, post: String, existingTopics: String): String {
+fun extractTopics(chatModel: ChatModel, post: String, existingTopics: String): String {
     val messages = listOf(
         SystemMessage(topicModelingSystemPrompt),
         UserMessage("Existing topics: $existingTopics"),
@@ -196,19 +196,19 @@ fun createBloomFilter(jedis: JedisPooled, name: String) {
     }
 }
 
-fun createCountMinSketch(jedisPool: JedisPool): String {
+fun createTopK(jedisPool: JedisPool): String {
     val windowBucket = LocalDateTime.now().withMinute(0).withSecond(0).withNano(0)
     try {
         jedisPool.resource.use {
             val multi = it.multi()
-            multi.cmsInitByDim("topics-cms:$windowBucket", 3000, 10)
+            multi.topkReserve("topics-topk:$windowBucket", 15, 3000, 10, 0.9)
             multi.exec()
         }
     } catch (_: JedisDataException) {
         println("Count-min sketch already exists")
     }
 
-    return "topics-cms:$windowBucket"
+    return "topics-topk:$windowBucket"
 }
 
 val printUri: (Event) -> Pair<Boolean, String> = {
@@ -229,18 +229,24 @@ fun deduplicate(jedis: JedisPooled, bloomFilter: String): (Event) -> Pair<Boolea
 fun extractTopics(chatModel: ChatModel, jedisPool: JedisPool): (Event) -> Pair<Boolean, String> = { event ->
     jedisPool.resource.use { jedis ->
         val existingTopics = jedis.smembers("topics")
-        val topics = topicModeling(chatModel, event.text, existingTopics.joinToString(", "))
+        val topics = extractTopics(chatModel, event.text, existingTopics.joinToString(", "))
             .replace("\"", "")
             .replace("“", "")
             .replace("”", "")
             .split(",")
+            .filter { it.isNotBlank() }
             .map { it.trim() }
 
-        val cmsKey = createCountMinSketch(jedisPool)
+        val topKKey = createTopK(jedisPool)
         val multi = jedis.multi()
         multi.hset("post:" + event.uri.replace("at://did:plc:", ""), mapOf("topics" to topics.joinToString("|")))
-        multi.sadd("topics", *topics.toTypedArray())
-        multi.cmsIncrBy(cmsKey, topics.filter { it.isNotBlank() }.associateWith { 1 })
+
+        val filteredTopics = topics.filter { it.isNotBlank() }
+
+        if (filteredTopics.isNotEmpty()) {
+            multi.sadd("topics", *filteredTopics.toTypedArray())
+            multi.topkAdd(topKKey, *filteredTopics.toTypedArray())
+        }
         multi.exec()
         Pair(true, "OK")
     }

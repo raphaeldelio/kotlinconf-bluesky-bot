@@ -15,6 +15,18 @@ data class Event(
     val langs: List<String>,
     val similarityScore: Double
 ) {
+    fun toMap() = mapOf(
+        "did" to this.did,
+        "timeUs" to this.timeUs,
+        "text" to this.text,
+        "langs" to this.langs.joinToString("|"),
+        "operation" to this.operation,
+        "rkey" to this.rkey,
+        "parentUri" to this.parentUri,
+        "rootUri" to this.rootUri,
+        "uri" to this.uri
+    )
+
     companion object {
         fun fromMap(entry: StreamEntry): Event {
             return fromMap(entry.fields)

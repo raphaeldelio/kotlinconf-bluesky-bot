@@ -1,5 +1,11 @@
 package dev.raphaeldelio
 
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.websocket.WebSockets
+import io.ktor.serialization.kotlinx.json.json
+import kotlinx.serialization.json.Json
 import redis.clients.jedis.JedisPooled
 import redis.clients.jedis.StreamEntryID
 import redis.clients.jedis.bloom.BFReserveParams
@@ -19,6 +25,20 @@ import org.springframework.ai.vectorstore.redis.RedisVectorStore
 import org.springframework.ai.vectorstore.redis.RedisVectorStore.MetadataField
 import redis.clients.jedis.search.Schema.FieldType
 import org.springframework.ai.vectorstore.SearchRequest
+
+val webSocketClient = HttpClient(CIO) {
+    install(WebSockets)
+}
+
+val httpClient = HttpClient(CIO) {
+    install(ContentNegotiation) {
+        json(Json {
+            ignoreUnknownKeys = true
+        })
+    }
+}
+
+val jsonParser = Json { ignoreUnknownKeys = true }
 
 val jedisPooled = JedisPooled()
 
@@ -102,6 +122,14 @@ fun deduplicate(bloomFilter: String): (Event) -> Pair<Boolean, String> {
             Pair(true, "OK")
         }
     }
+}
+
+fun ackFn():  (String, String, StreamEntry) -> Unit = { streamName, consumerGroup, entry ->
+    jedisPooled.xack(
+        streamName,
+        consumerGroup,
+        entry.id
+    )
 }
 
 fun ackAndBfFn(bloomFilter: String):  (String, String, StreamEntry) -> Unit = { streamName, consumerGroup, entry ->
@@ -203,6 +231,10 @@ fun processUserRequest(
 ): String {
     val routes = matchRoute(query)
     println(routes)
+
+    if (routes.isEmpty()) {
+        return "Sorry, I couldn't find any relevant information from your post. Try asking what's trending or what people are saying about a specific topic."
+    }
 
     val enrichedData = routes.map { route -> handler(route, query) }
 
