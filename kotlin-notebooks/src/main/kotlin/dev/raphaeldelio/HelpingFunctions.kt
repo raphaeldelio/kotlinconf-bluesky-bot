@@ -18,6 +18,7 @@ import org.springframework.ai.ollama.api.OllamaOptions
 import org.springframework.ai.chat.messages.SystemMessage
 import org.springframework.ai.chat.messages.UserMessage
 import org.springframework.ai.chat.prompt.Prompt
+import org.springframework.ai.document.Document
 import java.io.File
 import redis.clients.jedis.search.Query
 import java.time.LocalDateTime
@@ -25,6 +26,7 @@ import org.springframework.ai.vectorstore.redis.RedisVectorStore
 import org.springframework.ai.vectorstore.redis.RedisVectorStore.MetadataField
 import redis.clients.jedis.search.Schema.FieldType
 import org.springframework.ai.vectorstore.SearchRequest
+import java.util.UUID
 
 val webSocketClient = HttpClient(CIO) {
     install(WebSockets)
@@ -213,21 +215,14 @@ fun matchRoute(query: String): Set<String> {
 
 fun trendingTopics(): Set<String> {
     val currentMinute = LocalDateTime.now().withMinute(0).withSecond(0).withNano(0).toString()
-    return try {
-        jedisPooled.smembers("topics")
-            .map { it to jedisPooled.cmsQuery("topics-cms:$currentMinute", it).first() }
-            .sortedByDescending { it.second }
-            .take(10)
-            .map { it.first }
-            .toSet()
-    } catch (_: Exception) {
-        emptySet()
-    }
+    val topTopics = jedisPooled.topkList("topics-topk:$currentMinute")
+    topTopics.add("These are the most mentioned topics. Don't try to guess what's being said in the topics.")
+    return topTopics.filter { it.isNotBlank() }.toSet()
 }
 
 fun processUserRequest(
     query: String,
-    handler: (String, String) -> Iterable<String>
+    routesHandler: (String, String) -> Iterable<String>
 ): String {
     val routes = matchRoute(query)
     println(routes)
@@ -236,62 +231,15 @@ fun processUserRequest(
         return "Sorry, I couldn't find any relevant information from your post. Try asking what's trending or what people are saying about a specific topic."
     }
 
-    val enrichedData = routes.map { route -> handler(route, query) }
+    val enrichedData = routes.map { route -> routesHandler(route, query) }
+    println(enrichedData + "\n")
 
-    val systemPrompt = """
-    You write tweet-sized posts to help users analyze political topics happening in Bluesky. 
-    Use the provided data (from posts), but remember: the user doesn’t see it. 
-    Be extremely concise — max 300 characters. One paragraph. Every word counts.
-    You're replying directly to the end user (the one who asked the question)
-    
-    Examples:
-    Summarization intent:
-    	1.	
+    val systemPrompt = "You are an AI assistant that analyzes social media posts about artificial intelligence. You may receive datasets to support your analysis. Respond in a single paragraph with a maximum of 300 characters—like a tweet. Your answer must be concise, informative, and context-aware. Include relevant insights, trends, or classifications, but never exceed 300 characters. Avoid filler, repetition, or unnecessary explanation. Prioritize clarity, accuracy, and relevance. If unsure, default to brief summaries or best-effort classification. Your goal is to help users quickly understand or categorize AI-related content."
 
-Debate around the new tax policy is intense. Supporters say it’s key for funding public services, while critics argue it puts too much pressure on the middle class and ignores corporate loopholes.
-
-	2.	
-
-Angela Merkel is being praised in hindsight, with users pointing to her calm leadership and long-term vision — especially when comparing her era to recent political instability in Europe.
-
-	3.	
-
-Housing is a top concern. Many posts blame unaffordable prices on weak rent control, foreign investors, and lack of government action. Frustration is growing, especially among young renters.
-
-	4.	
-
-The new climate bill is getting mixed reactions. Some see it as a step forward, but many question if it goes far enough or if it’s just corporate-friendly greenwashing without real accountability.
-
-	5.	
-
-Student loan forgiveness is trending. Supporters say it brings relief to millions, but others push back, arguing it’s unfair to those who already paid or never went to college.
-
-    Trending topics intent:
-    		1.	
-
-Trending: climate protests, Merkel’s legacy, AI regulation, housing crisis, student debt relief.
-
-	2.	
-
-This week’s hot topics: Gaza ceasefire talks, EU elections, inflation fears, TikTok ban debate, green energy subsidies.
-
-	3.	
-
-People are posting about: Trump trial, Gen Z voting power, Supreme Court decisions, tech layoffs, universal basic income.
-
-	4.	
-
-Buzzing now: Ukraine aid package, healthcare reform, crypto regulation, labor strikes, rising food prices.
-
-	5.	
-
-Most talked-about: political polarization, tax reform, immigration policy, public education funding, climate anxiety.
-    """.trimIndent()
-
+    println("LLM Response:")
     return ollamaChatModel.call(
         Prompt(
             SystemMessage(systemPrompt),
-            SystemMessage("Intents detected: $routes"),
             SystemMessage("Enriching data: $enrichedData"),
             UserMessage("User query: $query")
         )
@@ -300,7 +248,12 @@ Most talked-about: political polarization, tax reform, immigration policy, publi
 
 fun summarization(userQuery: String): List<String> {
     val existingTopics = jedisPooled.smembers("topics").joinToString { ", " }
-    val queryTopics = topicExtraction(userQuery, existingTopics).replace("\"", "").split(", ")
+    val queryTopics = topicExtraction(userQuery, existingTopics)
+        .replace("\"", "")
+        .replace("“", "")
+        .replace("”", "")
+        .split(", ")
+        .map { it.trim() }
     println(queryTopics)
 
     return queryTopics.map { topic ->
@@ -344,4 +297,46 @@ fun getRedisVectorStore(): RedisVectorStore {
         .build()
     redisVectorStore.afterPropertiesSet()
     return redisVectorStore
+}
+
+fun getSemanticCacheRedisVectorStore(embeddingModel: TransformersEmbeddingModel): RedisVectorStore {
+    val redisVectorStore = RedisVectorStore.builder(jedisPooled, embeddingModel)
+        .indexName("semanticCacheIdx")
+        .contentFieldName("text")
+        .embeddingFieldName("textEmbedding")
+        .metadataFields(
+            MetadataField("answer", FieldType.TEXT),
+        )
+        .prefix("semanticcache:")
+        .initializeSchema(true)
+        .vectorAlgorithm(RedisVectorStore.Algorithm.FLAT)
+        .build()
+    redisVectorStore.afterPropertiesSet()
+    return redisVectorStore
+}
+
+fun insertIntoCache(redisVectorStore: RedisVectorStore, post: String, answer: String) {
+    redisVectorStore.add(listOf(createDocument(post, answer)))
+}
+
+fun createDocument(post: String, answer: String): Document {
+    return Document(
+        UUID.randomUUID().toString(),
+        post,
+        mapOf("answer" to answer),
+    )
+}
+
+fun getFromCache(redisVectorStore: RedisVectorStore, post: String): String {
+    val result = redisVectorStore.similaritySearch(post)
+    if (result?.isEmpty() == true) {
+        return ""
+    }
+
+    val score = redisVectorStore.similaritySearch(post)?.first()?.score ?: 0.0
+    if (score > 0.9) {
+        return result?.first()?.metadata?.get("answer").toString()
+    } else {
+        return ""
+    }
 }

@@ -20,6 +20,8 @@ fun main() {
     val jedis = JedisPooled()
 
     val embeddingModel = TransformersEmbeddingModel()
+    embeddingModel.setModelResource("https://huggingface.co/sentence-transformers/all-mpnet-base-v2/resolve/main/onnx/model.onnx?download=true")
+    embeddingModel.setTokenizerResource("https://huggingface.co/sentence-transformers/all-mpnet-base-v2/raw/main/tokenizer.json")
     embeddingModel.afterPropertiesSet()
 
     val wasIndexAlreadyCreated = jedis.ftList().contains("classifierIdx")
@@ -160,18 +162,30 @@ fun createBloomFilter(jedis: JedisPooled, name: String) {
 }
 
 fun breakSentenceIntoClauses(sentence: String): List<String> {
-    return sentence.split(Regex("""[!?,.:;()"\[\]{}]+"""))
+    return sentence.split(Regex("""[!?,.:]+"""))
         .filter { it.isNotBlank() }.map { it.trim() }
 }
 
+fun removeUrls(text: String): String {
+    return text.replace(Regex("""(?:https?:\/\/)?(?:www\.)?[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\/\S*)?"""), "")
+        .replace(Regex("""@\w+"""), "")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+}
+
 fun classify(redisVectorStore: RedisVectorStore, post: String): List<Double> {
-    return breakSentenceIntoClauses(post).map { clause ->
+    val cleanedPost = removeUrls(post)
+    return breakSentenceIntoClauses(cleanedPost).map { clause ->
+        println(clause)
         (redisVectorStore.similaritySearch(
             SearchRequest.builder()
                 .topK(1)
                 .query(clause)
                 .build()
-        )?.map { it.score ?: 0.0 } ?: emptyList())
+        )?.map {
+            println("Matched sentence: ${it.text}")
+            it.score ?: 0.0
+        } ?: emptyList())
     }.flatten()
 }
 
@@ -192,9 +206,9 @@ fun deduplicate(jedis: JedisPooled, bloomFilter: String): (Event) -> Pair<Boolea
 
 fun filter(redisVectorStore: RedisVectorStore): (Event) -> Pair<Boolean, String> =
     { event ->
-        if (event.text.isNotBlank() && event.operation != "delete") {
+        if (event.text.isNotBlank() && event.langs.contains("en") && event.operation != "delete") {
             val scores = classify(redisVectorStore, event.text)
-            if (scores.any { it > 0.75 }) {
+            if (scores.any { it > 0.76 }) {
                 Pair(true, "OK")
             } else {
                 Pair(false, "Not a post related to software")

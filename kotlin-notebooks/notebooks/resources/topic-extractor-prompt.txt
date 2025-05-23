@@ -12,7 +12,9 @@ Also avoid overly narrow items such as specific model version numbers or isolate
 
 If the topic or a very similar one is already in the provided list of existing topics, use the one from the list. Otherwise, feel free to create a new one.
 
-If the content is not related to AI, return an empty string.
+If the content is not related to AI at all, return an empty string.
+
+If the content still mentions AI, try to imply topics anyway.
 
 Format your response as comma separated values (ALWAYS, I MEAN IT):
 "topic1, topic2, topic3"
